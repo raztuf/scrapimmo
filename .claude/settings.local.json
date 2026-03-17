@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python scrapimmo.py)",
+      "Bash(PYTHONIOENCODING=utf-8 python scrapimmo.py)",
+      "Bash(pip show:*)"
+    ]
+  }
+}
