@@ -3,7 +3,9 @@
     "allow": [
       "Bash(python scrapimmo.py)",
       "Bash(PYTHONIOENCODING=utf-8 python scrapimmo.py)",
-      "Bash(pip show:*)"
+      "Bash(pip show:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
     ]
   }
 }
