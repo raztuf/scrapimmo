@@ -1,35 +1,19 @@
-import json
 import os
 import random
-import re
-import sys
 import time
 import openpyxl
 from bs4 import BeautifulSoup
-from datetime import datetime
 from openpyxl import load_workbook
 from playwright.sync_api import sync_playwright, Page
 
+from common import (
+    PROVINCES, DELAY_MIN, DELAY_MAX, BROWSER_ARGS, USER_AGENT, LOCALE, VIEWPORT,
+    WEBDRIVER_INIT_SCRIPT, ts, sleep_progress, fetch, extract_json_object,
+)
+
 # ── Config ────────────────────────────────────────────────────────────────────
-COLUMNS   = ["url", "postal_code", "locality", "price", "done"]
+COLUMNS = ["url", "postal_code", "locality", "price", "done"]
 
-DELAY_MIN = 2.5
-DELAY_MAX = 5.0
-
-PROVINCES = {
-    "1": {
-        "name":          "Liège",
-        "url_slug":      "liege/province",
-        "postal_ranges": [(4000, 4999)],
-        "output_file":   "liege_private_sellers.xlsx",
-    },
-    "2": {
-        "name":          "Namur",
-        "url_slug":      "namur/province",
-        "postal_ranges": [(5000, 5999)],
-        "output_file":   "namur_private_sellers.xlsx",
-    },
-}
 
 def choose_province() -> dict:
     print("Select province to scrape:")
@@ -95,59 +79,6 @@ def parse_page(html: str, postal_ranges: list[tuple[int, int]]) -> list[dict]:
     return results
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-def ts():
-    return datetime.now().strftime("%H:%M:%S")
-
-
-def sleep_progress(seconds: float, label: str = "cooldown"):
-    bar_width = 30
-    start = time.time()
-    end   = start + seconds
-    while True:
-        elapsed = time.time() - start
-        ratio   = min(elapsed / seconds, 1.0)
-        filled  = int(bar_width * ratio)
-        bar     = "█" * filled + "░" * (bar_width - filled)
-        remaining = max(0, seconds - elapsed)
-        sys.stdout.write(f"\r  [{ts()}] {label}  [{bar}] {remaining:.0f}s remaining  ")
-        sys.stdout.flush()
-        if time.time() >= end:
-            break
-        time.sleep(0.5)
-    sys.stdout.write("\n")
-
-
-def fetch(page: Page, url: str) -> str | None:
-    """Navigate to url, return HTML string or None on failure."""
-    for attempt in range(1, 4):
-        try:
-            response = page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-            status   = response.status if response else 0
-
-            if status == 200:
-                return page.content()
-            elif status == 429:
-                wait = random.uniform(45, 90)
-                sleep_progress(wait, f"WARN  Rate limited")
-            elif status == 403:
-                wait = random.uniform(60, 120) * attempt
-                sleep_progress(wait, f"WARN  403 attempt {attempt}/3")
-            else:
-                print(f"  [{ts()}] FAIL  HTTP {status} — gave up on {url}")
-                return None
-
-        except Exception as e:
-            wait = 10 * attempt
-            print(f"  [{ts()}] WARN  Error attempt {attempt}/3: {e} — sleeping {wait}s")
-            if attempt == 3:
-                return None
-            time.sleep(wait)
-
-    print(f"  [{ts()}] FAIL  gave up on {url}")
-    return None
-
-
 def is_private_owner(page: Page, listing_url: str) -> bool:
     print(f"    [{ts()}] CHECK {listing_url}")
     html = fetch(page, listing_url)
@@ -155,18 +86,15 @@ def is_private_owner(page: Page, listing_url: str) -> bool:
     if html is None:
         return False
 
-    match = re.search(r'window\.classified\s*=\s*(\{.*?\})\s*;', html, re.DOTALL)
-    if match:
-        try:
-            data      = json.loads(match.group(1))
-            customers = data.get("customers") or []
-            result    = bool(customers) and all(c.get("type") == "PRIVATE" for c in customers)
-            print(f"    [{ts()}] {'  OK ✓ private owner' if result else '  SKIP agency/unknown'}")
-            return result
-        except json.JSONDecodeError:
-            pass
-    print(f"    [{ts()}]   SKIP could not parse window.classified")
-    return False
+    data = extract_json_object(html, "window.classified")
+    if data is None:
+        print(f"    [{ts()}]   SKIP could not parse window.classified")
+        return False
+
+    customers = data.get("customers") or []
+    result    = bool(customers) and all(c.get("type") == "PRIVATE" for c in customers)
+    print(f"    [{ts()}] {'  OK ✓ private owner' if result else '  SKIP agency/unknown'}")
+    return result
 
 
 # ── Excel helpers ──────────────────────────────────────────────────────────────
@@ -226,25 +154,14 @@ def scrape():
 
     with sync_playwright() as p:
         print(f"[{ts()}] Launching Chrome...")
-        browser = p.chromium.launch(
-            channel="chrome",
-            headless=False,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--disable-infobars",
-            ],
-        )
+        browser = p.chromium.launch(channel="chrome", headless=False, args=BROWSER_ARGS)
         print(f"[{ts()}] Chrome launched, opening page...")
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            locale="fr-BE",
-            viewport={"width": 1280, "height": 800},
+            user_agent=USER_AGENT,
+            locale=LOCALE,
+            viewport=VIEWPORT,
         )
-        context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        context.add_init_script(WEBDRIVER_INIT_SCRIPT)
         page = context.new_page()
         print(f"[{ts()}] Page ready, starting scrape...")
 

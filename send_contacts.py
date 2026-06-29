@@ -1,82 +1,51 @@
 import os
 import random
-import sys
-import time
-from datetime import datetime
-
 import openpyxl
 from playwright.sync_api import sync_playwright, Page, TimeoutError as PWTimeout
 
-# ── Sender info ───────────────────────────────────────────────────────────────
+from common import (
+    PROVINCES, BROWSER_ARGS, USER_AGENT, LOCALE, VIEWPORT, WEBDRIVER_INIT_SCRIPT,
+    ts, sleep, sleep_progress,
+)
+
+# ── Sender info (from environment — see .env) ──────────────────────────────────
 FIRST_NAME = os.environ.get("SENDER_FIRST_NAME", "")
 LAST_NAME  = os.environ.get("SENDER_LAST_NAME", "")
 EMAIL      = os.environ.get("SENDER_EMAIL", "")
 PHONE      = os.environ.get("SENDER_PHONE", "")
 
-MESSAGE = open("contact.txt", encoding="utf-8").read().strip()
-
-XLSX_FILE  = "namur_private_sellers.xlsx"
-DELAY_MIN  = 2.5
-DELAY_MAX  = 5.0
+CONTACT_FILE = "contact.txt"
+DEFAULT_XLSX = PROVINCES["2"]["output_file"]  # Namur
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-def ts():
-    return datetime.now().strftime("%H:%M:%S")
+def validate_sender() -> bool:
+    """Ensure every sender field is set so we never submit a blank contact form."""
+    missing = [
+        name for name, val in (
+            ("SENDER_FIRST_NAME", FIRST_NAME),
+            ("SENDER_LAST_NAME",  LAST_NAME),
+            ("SENDER_EMAIL",      EMAIL),
+            ("SENDER_PHONE",      PHONE),
+        ) if not val.strip()
+    ]
+    if missing:
+        print(f"[{ts()}] FAIL  missing sender env vars: {', '.join(missing)}")
+        print(f"[{ts()}]       set them (e.g. in .env) before sending.")
+        return False
+    return True
 
 
-def sleep(lo=DELAY_MIN, hi=DELAY_MAX):
-    time.sleep(random.uniform(lo, hi))
+def resolve_xlsx(province: str | None, file: str | None) -> str:
+    if file:
+        return file
+    if province:
+        for p in PROVINCES.values():
+            if p["url_slug"].split("/")[0] == province.lower():
+                return p["output_file"]
+    return DEFAULT_XLSX
 
 
-def sleep_progress(seconds: float, label: str = "cooldown"):
-    bar_width = 30
-    start = time.time()
-    end   = start + seconds
-    while True:
-        elapsed   = time.time() - start
-        ratio     = min(elapsed / seconds, 1.0)
-        filled    = int(bar_width * ratio)
-        bar       = "█" * filled + "░" * (bar_width - filled)
-        remaining = max(0, seconds - elapsed)
-        sys.stdout.write(f"\r  [{ts()}] {label}  [{bar}] {remaining:.0f}s remaining  ")
-        sys.stdout.flush()
-        if time.time() >= end:
-            break
-        time.sleep(0.5)
-    sys.stdout.write("\n")
-
-
-def fetch(page: Page, url: str) -> bool:
-    """Navigate to url with 403/429 retry logic. Returns True on success."""
-    for attempt in range(1, 4):
-        try:
-            response = page.goto(url, wait_until="domcontentloaded", timeout=40_000)
-            status   = response.status if response else 0
-
-            if status == 200:
-                return True
-            elif status == 429:
-                wait = random.uniform(45, 90)
-                sleep_progress(wait, f"WARN  Rate limited (429)")
-            elif status == 403:
-                wait = random.uniform(60, 120) * attempt
-                sleep_progress(wait, f"WARN  403 attempt {attempt}/3")
-            else:
-                print(f"  [{ts()}] FAIL  HTTP {status} — {url}")
-                return False
-
-        except Exception as e:
-            wait = 10 * attempt
-            print(f"  [{ts()}] WARN  Error attempt {attempt}/3: {e} — sleeping {wait}s")
-            if attempt == 3:
-                return False
-            time.sleep(wait)
-
-    print(f"  [{ts()}] FAIL  gave up on {url}")
-    return False
-
-
+# ── Form interaction ──────────────────────────────────────────────────────────
 def accept_cookies(page: Page):
     try:
         btn = page.locator(
@@ -88,14 +57,21 @@ def accept_cookies(page: Page):
         ).first
         btn.wait_for(timeout=8_000)
         btn.click()
-        time.sleep(1.5)
+        sleep(1.5, 1.5)
     except PWTimeout:
         pass
 
 
-def fill_contact_form(page: Page, url: str) -> bool:
+def fill_contact_form(page: Page, url: str, message: str) -> bool:
     """Navigate to a listing, fill and submit the contact form. Returns True on success."""
-    if not fetch(page, url):
+    response = None
+    try:
+        response = page.goto(url, wait_until="domcontentloaded", timeout=40_000)
+    except Exception as e:
+        print(f"  [{ts()}] FAIL  navigation error: {e}")
+        return False
+    if not response or response.status != 200:
+        print(f"  [{ts()}] FAIL  HTTP {response.status if response else '?'} — {url}")
         return False
 
     accept_cookies(page)
@@ -143,7 +119,7 @@ def fill_contact_form(page: Page, url: str) -> bool:
         # Check "Ask for more info"
         ask_id = dialog.locator("input[id*='askMoreInfo']").get_attribute("id")
         dialog.locator(f"label[for='{ask_id}']").click()
-        dialog.locator("textarea[name='message']").fill(MESSAGE)
+        dialog.locator("textarea[name='message']").fill(message)
         sleep(1.0, 2.0)
     except PWTimeout as e:
         print(f"  [{ts()}] FAIL  form field not found: {e}")
@@ -181,8 +157,20 @@ def fill_contact_form(page: Page, url: str) -> bool:
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-def main(limit=None):
-    wb = openpyxl.load_workbook(XLSX_FILE)
+def main(xlsx_file=DEFAULT_XLSX, limit=None):
+    if not validate_sender():
+        return
+    if not os.path.exists(xlsx_file):
+        print(f"[{ts()}] FAIL  file not found: {xlsx_file}")
+        return
+    if not os.path.exists(CONTACT_FILE):
+        print(f"[{ts()}] FAIL  message template not found: {CONTACT_FILE}")
+        return
+
+    with open(CONTACT_FILE, encoding="utf-8") as f:
+        message = f.read().strip()
+
+    wb = openpyxl.load_workbook(xlsx_file)
     ws = wb.active
 
     header = [cell.value for cell in ws[1]]
@@ -201,7 +189,7 @@ def main(limit=None):
     success = 0
     failed  = 0
 
-    print(f"[{ts()}] {total} listings to contact\n")
+    print(f"[{ts()}] {total} listings to contact from {xlsx_file}\n")
 
     PROFILE_DIR = os.path.join(os.path.dirname(__file__), "chrome_profile")
 
@@ -210,39 +198,27 @@ def main(limit=None):
             user_data_dir=PROFILE_DIR,
             channel="chrome",
             headless=False,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--disable-infobars",
-            ],
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            locale="fr-BE",
-            viewport={"width": 1280, "height": 800},
+            args=BROWSER_ARGS,
+            user_agent=USER_AGENT,
+            locale=LOCALE,
+            viewport=VIEWPORT,
         )
-        context.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-        )
+        context.add_init_script(WEBDRIVER_INIT_SCRIPT)
         page = context.new_page()
 
         for idx, (row_num, url) in enumerate(rows, 1):
             print(f"  [{ts()}] [{idx}/{total}] {url}")
-            ok = fill_contact_form(page, url)
+            ok = fill_contact_form(page, url, message)
 
+            # Save after every listing so a crash never re-contacts the same seller.
             if ok:
                 ws.cell(row_num, done_col).value = "done"
-                wb.save(XLSX_FILE)
+                wb.save(xlsx_file)
                 success += 1
                 print(f"  [{ts()}]   ✓ sent — progress saved")
             else:
                 ws.cell(row_num, done_col).value = "failed"
-                wb.save(XLSX_FILE)
+                wb.save(xlsx_file)
                 failed += 1
                 print(f"  [{ts()}]   ✗ failed — marked in xlsx")
 
@@ -263,7 +239,12 @@ def main(limit=None):
 
 if __name__ == "__main__":
     import argparse
+    prov_choices = [p["url_slug"].split("/")[0] for p in PROVINCES.values()]
     ap = argparse.ArgumentParser()
+    ap.add_argument("--province", choices=prov_choices,
+                    help="province to contact; resolves to its xlsx file")
+    ap.add_argument("--file", help="explicit xlsx file (overrides --province)")
     ap.add_argument("--test", action="store_true", help="Process only the first listing")
     args = ap.parse_args()
-    main(limit=1 if args.test else None)
+    main(xlsx_file=resolve_xlsx(args.province, args.file),
+         limit=1 if args.test else None)
