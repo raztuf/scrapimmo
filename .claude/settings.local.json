@@ -11,7 +11,11 @@
       "Bash(pip install:*)",
       "Bash(python3:*)",
       "Bash(playwright install *)",
-      "Bash(firefox --version)"
+      "Bash(firefox --version)",
+      "Bash(python -m py_compile scrapimmo.py send_contacts.py)",
+      "Bash(SENDER_FIRST_NAME=Frans SENDER_LAST_NAME=Immo21 SENDER_EMAIL=a@b.net SENDER_PHONE=+32 python *)",
+      "Bash(printenv SENDER_EMAIL)",
+      "Bash(git check-ignore *)"
     ]
   }
 }

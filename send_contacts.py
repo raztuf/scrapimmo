@@ -1,5 +1,7 @@
 import os
 import random
+import re
+import time
 import openpyxl
 from playwright.sync_api import sync_playwright, Page, TimeoutError as PWTimeout
 
@@ -46,6 +48,27 @@ def resolve_xlsx(province: str | None, file: str | None) -> str:
 
 
 # ── Form interaction ──────────────────────────────────────────────────────────
+def first_visible(page: Page, selector: str, timeout: float = 12.0):
+    """Return the first *visible* element matching selector, or None on timeout.
+
+    Immoweb renders two identical 'Get in touch' buttons (a hidden duplicate and
+    the live one); Locator.first can resolve to the hidden decoy and then wait
+    forever for it to become visible, so we poll for one that is actually shown.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        loc = page.locator(selector)
+        for i in range(loc.count()):
+            btn = loc.nth(i)
+            try:
+                if btn.is_visible():
+                    return btn
+            except Exception:
+                continue
+        page.wait_for_timeout(500)
+    return None
+
+
 def accept_cookies(page: Page):
     try:
         btn = page.locator(
@@ -86,18 +109,19 @@ def fill_contact_form(page: Page, url: str, message: str) -> bool:
     # ── Click "Get in touch" to open the modal ────────────────────────────────
     page.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.6)")
     sleep(0.8, 1.2)
+    get_in_touch = first_visible(page,
+        "button:has-text('Get in touch'), "
+        "button:has-text('Prendre contact'), "
+        "button:has-text('Contacter')")
+    if get_in_touch is None:
+        print(f"  [{ts()}] FAIL  'Get in touch' button not found")
+        return False
     try:
-        get_in_touch = page.locator(
-            "button:has-text('Get in touch'), "
-            "button:has-text('Prendre contact'), "
-            "button:has-text('Contacter')"
-        ).first
-        get_in_touch.wait_for(timeout=10_000)
         get_in_touch.scroll_into_view_if_needed()
         get_in_touch.click()
         sleep(1.0, 2.0)
     except PWTimeout:
-        print(f"  [{ts()}] FAIL  'Get in touch' button not found")
+        print(f"  [{ts()}] FAIL  could not click 'Get in touch'")
         return False
 
     # ── Wait for dialog then fill fields scoped inside it ────────────────────
@@ -136,20 +160,17 @@ def fill_contact_form(page: Page, url: str, message: str) -> bool:
         print(f"  [{ts()}] FAIL  submit button not found")
         return False
 
-    # Success = dialog closes OR shows a success message inside
+    # Success = the confirmation text appears inside the dialog. Note immoweb
+    # does NOT close the dialog on success — it swaps in a "Request successfully
+    # sent" panel offering to contact similar listings — so we match that text
+    # rather than waiting for the dialog to hide.
+    success_re = re.compile(
+        r"successfully sent|Demande envoyée|envoyée avec succès|"
+        r"message a été envoyé|Votre demande a bien été envoyée",
+        re.IGNORECASE,
+    )
     try:
-        page.locator(
-            "text=Request successfully sent, "
-            "text=successfully sent, "
-            "text=Demande envoyée, "
-            "text=envoyée avec succès, "
-            "text=Votre message a été envoyé"
-        ).first.wait_for(timeout=10_000)
-        return True
-    except PWTimeout:
-        pass
-    try:
-        dialog.wait_for(state="hidden", timeout=5_000)
+        page.get_by_text(success_re).first.wait_for(timeout=10_000)
         return True
     except PWTimeout:
         print(f"  [{ts()}] FAIL  no success confirmation detected")
@@ -169,6 +190,14 @@ def main(xlsx_file=DEFAULT_XLSX, limit=None):
 
     with open(CONTACT_FILE, encoding="utf-8") as f:
         message = f.read().strip()
+
+    # Fill signature placeholders from the sender env vars so the template
+    # stays in sync with .env (no hand-edited copy to drift out of date).
+    message = (message
+               .replace("[NOM]",        FIRST_NAME)
+               .replace("[AGENCE]",     LAST_NAME)
+               .replace("[TÉLÉPHONE]",  PHONE)
+               .replace("[EMAIL]",      EMAIL))
 
     wb = openpyxl.load_workbook(xlsx_file)
     ws = wb.active

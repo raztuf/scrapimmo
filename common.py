@@ -1,11 +1,39 @@
 """Shared config and helpers for the immoweb scraper and contact sender."""
 import json
+import os
 import random
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 from playwright.sync_api import Page
+
+
+# ── .env loader ───────────────────────────────────────────────────────────────
+def load_env(path: str | Path | None = None) -> None:
+    """Load KEY=VALUE pairs from a .env file into os.environ.
+
+    Dependency-free (no python-dotenv). Existing environment variables win, so
+    you can still override a value from the shell. Lines that are blank, start
+    with '#', or lack '=' are ignored; surrounding quotes are stripped.
+    """
+    env_path = Path(path) if path else Path(__file__).with_name(".env")
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+# Load .env as soon as common is imported so any script gets the sender vars.
+load_env()
 
 # ── Timing ──────────────────────────────────────────────────────────────────
 DELAY_MIN = 2.5

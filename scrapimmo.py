@@ -1,3 +1,4 @@
+import json
 import os
 import random
 import time
@@ -39,6 +40,31 @@ BASE_URL     = "https://www.immoweb.be/en/search/{type}/for-sale/{slug}?countrie
 SEARCH_TYPES = ("house", "apartment")
 
 
+def parse_price(listing) -> str:
+    """Read the clean price from the <iw-price> JSON attribute.
+
+    The visible text is rendered by a Vue component that concatenates two spans
+    (e.g. '€259,000259000€'), so we read the structured ':price' attribute
+    instead — 'mainDisplayPrice' is the formatted string, 'mainValue' the number.
+    """
+    iw = listing.find("iw-price")
+    if iw and iw.get(":price"):
+        try:
+            data = json.loads(iw.get(":price"))
+        except json.JSONDecodeError:
+            data = None
+        if data:
+            disp = data.get("mainDisplayPrice")
+            if disp:
+                return disp.strip()
+            mv = data.get("mainValue")
+            if mv is not None:
+                return f"€{int(mv):,}"
+    # Fallback: rendered text (may be mangled, but better than nothing)
+    price_tag = listing.find("p", class_="card--result__price")
+    return price_tag.get_text(strip=True) if price_tag else ""
+
+
 # ── Parse a single search result page ─────────────────────────────────────────
 def parse_page(html: str, postal_ranges: list[tuple[int, int]]) -> list[dict]:
     soup     = BeautifulSoup(html, "html.parser")
@@ -66,8 +92,7 @@ def parse_page(html: str, postal_ranges: list[tuple[int, int]]) -> list[dict]:
             continue
 
         # ── Extract price ──────────────────────────────────────────────────────
-        price_tag = listing.find("p", class_="card--result__price")
-        price = price_tag.get_text(strip=True) if price_tag else ""
+        price = parse_price(listing)
 
         results.append({
             "url":         link["href"],
